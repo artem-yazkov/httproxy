@@ -1,4 +1,5 @@
 #include <errno.h>
+#include <fcntl.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -10,6 +11,8 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 
+#include "cache.h"
+
 #define LISTEN_ADDR   INADDR_ANY
 #define LISTEN_PORT   8080
 
@@ -20,7 +23,8 @@ typedef enum fd_type {
 } fd_type_t;
 
 typedef struct fd_info {
-    fd_type_t type;
+    fd_type_t       type;
+    cache_request_t request;
 } fd_info_t;
 
 typedef struct fd_pool {
@@ -91,6 +95,7 @@ int main(void)
             return -1;
         }
 
+        //for (int ifd = pool.fds_cnt - 1; ifd >= 0; ifd--) {
         for (int ifd = 0; ifd < pool.fds_cnt; ifd++) {
 
             if (pool.fds[ifd].revents == 0) {
@@ -119,10 +124,15 @@ int main(void)
                         break;
                     } else {
                         /* new connection was accepted */
+                        int ioctl_fionbio = 1;
+                        rcode = ioctl(fd_cli, FIONBIO, &ioctl_fionbio);
+
                         pool.fds[pool.fds_cnt].fd = fd_cli;
                         pool.fds[pool.fds_cnt].events = POLLIN;
                         pool.infos[pool.fds_cnt].type = FD_TYPE_CLIENT;
                         fprintf(stdout, "new connection was accepted: %d\n", pool.fds_cnt);
+
+                        cache_req_init(&pool.infos[pool.fds_cnt].request);
                         pool.fds_cnt++;
                     }
                 }
@@ -135,21 +145,35 @@ int main(void)
                     char buffer[80];
                     rcode = recv(pool.fds[ifd].fd, buffer, sizeof(buffer), 0);
 
-                    if ((rcode < 0) && (errno == EWOULDBLOCK)) {
+                    if ((rcode < 0) && (errno == EAGAIN)) {
                         /* no more data */
+                        cache_req_process(&pool.infos[ifd].request);
+                        while (pool.infos[ifd].request.state == REQSTATE_FROM_MEMORY) {
+                            int rcache = cache_resp_read(&pool.infos[ifd].request, buffer, sizeof(buffer));
+                            int rsend = send(pool.fds[ifd].fd, buffer, rcache, 0);
+                        }
+
+                        close(pool.fds[ifd].fd);
+                        memcpy(&pool.fds[ifd], &pool.fds[ifd+1], (pool.fds_cnt - ifd) * sizeof(pool.fds[0]));
+                        memcpy(&pool.infos[ifd], &pool.infos[ifd+1], (pool.fds_cnt - ifd) * sizeof(pool.infos[0]));
+                        pool.fds_cnt--; // TODO: fix this
+
                         break;
+
                     } else if (rcode < 0) {
                         /* can't accept data block */
+
                     } else if (rcode == 0) {
                         /* connection was closed */
                         fprintf(stdout, "%d connection was closed\n", ifd);
+                        cache_req_clean(&pool.infos[ifd].request);
                         memcpy(&pool.fds[ifd], &pool.fds[ifd+1], (pool.fds_cnt - ifd) * sizeof(pool.fds[0]));
                         memcpy(&pool.infos[ifd], &pool.infos[ifd+1], (pool.fds_cnt - ifd) * sizeof(pool.infos[0]));
-                        pool.fds_cnt--; // TODO: move to the end of cycle
-                        fprintf(stdout, "%d connection was closed: fds_cnt: %d\n", pool.fds_cnt);
+                        pool.fds_cnt--; // TODO: fix this
+
                     } else {
-                        //fprintf(stdout, "%d bytes was readed\n", rcode);
-                        fwrite(buffer, rcode, 1, stdout);
+                        /* data block was accepted */
+                        cache_req_write(&pool.infos[ifd].request, buffer, rcode);
                     }
                 }
             }
