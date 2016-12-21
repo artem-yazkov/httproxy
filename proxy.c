@@ -138,14 +138,14 @@ int main(void)
                 }
 
             } else if (pool.infos[ifd].type == FD_TYPE_CLIENT) {
-                /* receive all incoming data until EWOULDBLOCK errno */
 
                 int rcode = 1;
                 while (rcode > 0) {
                     char buffer[80];
+                    /* receive all incoming data until EWOULDBLOCK errno */
                     rcode = recv(pool.fds[ifd].fd, buffer, sizeof(buffer), 0);
 
-                    if ((rcode < 0) && (errno == EAGAIN)) {
+                    if ((rcode < 0) && (errno == EWOULDBLOCK)) {
                         /* no more data */
                         cache_req_process(&pool.infos[ifd].request);
                         while (pool.infos[ifd].request.state == REQSTATE_FROM_MEMORY) {
