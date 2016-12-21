@@ -141,7 +141,7 @@ int main(void)
 
                 int rcode = 1;
                 while (rcode > 0) {
-                    char buffer[80];
+                    char buffer[1024];
                     /* receive all incoming data until EWOULDBLOCK errno */
                     rcode = recv(pool.fds[ifd].fd, buffer, sizeof(buffer), 0);
 

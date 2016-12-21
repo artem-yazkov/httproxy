@@ -18,7 +18,7 @@ static int
 __str_append(cache_str_t *str, char *data, size_t size)
 {
     if (str->size < (str->len + size)) {
-        str->size = str->len + size;
+        str->size = (str->len + size) * 2;
         str->data = realloc(str->data, str->size);
     }
     memcpy(&str->data[str->len], data, size);
@@ -132,16 +132,17 @@ __get_response(char *host, cache_str_t *req, cache_str_t *resp)
         perror("connect");
         exit(1);
     }
+    write(sock, req->data, req->len);
 
     char buffer[1024];
-    write(sock, "GET /\r\n", strlen("GET /\r\n")); // write(fd, char[]*, len);..
-    bzero(buffer, sizeof(buffer));
-
-    while(read(sock, buffer, sizeof(buffer) - 1) != 0){
-        fprintf(stderr, "%s", buffer);
+    //bzero(buffer, sizeof(buffer));
+    size_t rsize = 1;
+    while (rsize != 0){
+        rsize = read(sock, buffer, sizeof(buffer) - 1);
+        __str_append(resp, buffer, rsize);
+        //fprintf(stderr, "%s", buffer);
         bzero(buffer, sizeof(buffer));
     }
-
     shutdown(sock, SHUT_RDWR);
     close(sock);
 }
@@ -175,7 +176,7 @@ cache_req_process(cache_request_t *req)
     if (strcasecmp(mname, "GET") != 0) {
         /* unsupported method */
     }
-    __str_append_f(&req->hdr_srv, "GET %s HTTP/1.0\n", muri);
+    __str_append_f(&req->hdr_srv, "GET %s \n", muri);
 
     while (data) {
         char *fname = NULL, *fvalue = NULL;
@@ -192,8 +193,7 @@ cache_req_process(cache_request_t *req)
             __str_append_f(&req->hdr_srv, "%s: %s\n", fname, fvalue);
         }
     }
-
-    __get_response(mhost.data, &req->hdr_cli, &req->response);
+    __get_response(mhost.data, &req->hdr_srv, &req->response);
     //fwrite(req->response.data, req->response.len, 1, stdout);
 
     req->state = REQSTATE_FROM_MEMORY;
@@ -217,12 +217,22 @@ cache_req_clean(cache_request_t *req)
 int
 cache_resp_read(cache_request_t *req, char *buffer, size_t size)
 {
+#if 0
     if (req->cursor + size > req->hdr_srv.len) {
         size = req->hdr_srv.len - req->cursor;
     }
     memcpy(buffer, &req->hdr_srv.data[req->cursor], size);
     req->cursor += size;
     if (req->cursor == req->hdr_srv.len) {
+        req->state = REQSTATE_FINISHED;
+    }
+#endif
+    if (req->cursor + size > req->response.len) {
+        size = req->response.len - req->cursor;
+    }
+    memcpy(buffer, &req->response.data[req->cursor], size);
+    req->cursor += size;
+    if (req->cursor == req->response.len) {
         req->state = REQSTATE_FINISHED;
     }
     return (int)size;
