@@ -13,10 +13,17 @@ typedef enum cache_req_state {
     REQSTATE_FINISHED,
 } cache_req_state_t;
 
+typedef struct cache_str {
+    char *data;
+    size_t len;
+    size_t size;
+} cache_str_t;
+
 typedef struct cache_req {
     cache_req_state_t state;
-    char   *rdata;
-    size_t  rsize;
+    cache_str_t       hdr_cli;
+    cache_str_t       hdr_srv;
+    cache_str_t       response;
     size_t  cursor; // TODO: temp
 } cache_request_t;
 
