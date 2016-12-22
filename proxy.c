@@ -95,7 +95,6 @@ int main(void)
             return -1;
         }
 
-        //for (int ifd = pool.fds_cnt - 1; ifd >= 0; ifd--) {
         for (int ifd = 0; ifd < pool.fds_cnt; ifd++) {
 
             if (pool.fds[ifd].revents == 0) {
@@ -130,7 +129,7 @@ int main(void)
                         pool.fds[pool.fds_cnt].fd = fd_cli;
                         pool.fds[pool.fds_cnt].events = POLLIN;
                         pool.infos[pool.fds_cnt].type = FD_TYPE_CLIENT;
-                        fprintf(stdout, "new connection was accepted: %d\n", pool.fds_cnt);
+                        fprintf(stdout, "new connection was accepted\n");
 
                         cache_req_init(&pool.infos[pool.fds_cnt].request);
                         pool.fds_cnt++;
@@ -150,10 +149,11 @@ int main(void)
                         cache_req_process(&pool.infos[ifd].request);
                         while (pool.infos[ifd].request.state == REQSTATE_FROM_MEMORY) {
                             int rcache = cache_resp_read(&pool.infos[ifd].request, buffer, sizeof(buffer));
-                            int rsend = send(pool.fds[ifd].fd, buffer, rcache, 0);
+                            send(pool.fds[ifd].fd, buffer, rcache, 0);
                         }
 
                         close(pool.fds[ifd].fd);
+                        fprintf(stdout, "connection was closed\n");
                         memcpy(&pool.fds[ifd], &pool.fds[ifd+1], (pool.fds_cnt - ifd) * sizeof(pool.fds[0]));
                         memcpy(&pool.infos[ifd], &pool.infos[ifd+1], (pool.fds_cnt - ifd) * sizeof(pool.infos[0]));
                         pool.fds_cnt--; // TODO: fix this
@@ -165,7 +165,7 @@ int main(void)
 
                     } else if (rcode == 0) {
                         /* connection was closed */
-                        fprintf(stdout, "%d connection was closed\n", ifd);
+                        fprintf(stdout, "connection was closed\n");
                         cache_req_clean(&pool.infos[ifd].request);
                         memcpy(&pool.fds[ifd], &pool.fds[ifd+1], (pool.fds_cnt - ifd) * sizeof(pool.fds[0]));
                         memcpy(&pool.infos[ifd], &pool.infos[ifd+1], (pool.fds_cnt - ifd) * sizeof(pool.infos[0]));
