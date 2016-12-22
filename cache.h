@@ -23,7 +23,7 @@ typedef struct cache_req {
     cache_req_state_t state;
     cache_str_t       hdr_cli;
     cache_str_t       hdr_srv;
-    cache_str_t       response;
+    cache_str_t      *response;
     size_t  cursor; // TODO: temp
 } cache_request_t;
 

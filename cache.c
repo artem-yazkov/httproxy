@@ -10,8 +10,10 @@
 #include <netinet/in.h>
 #include <netdb.h>
 
-
+#include "cuckoo_hash.h"
 #include "cache.h"
+
+static struct cuckoo_hash *hash;
 
 /* append binary data to string */
 static int
@@ -150,6 +152,10 @@ __get_response(char *host, cache_str_t *req, cache_str_t *resp)
 void
 cache_req_init(cache_request_t *req)
 {
+    if (!hash) {
+        hash = calloc(1, sizeof(*hash));
+        cuckoo_hash_init(hash, 20);
+    }
     memset(req, 0, sizeof(*req));
     req->state = REQSTATE_INIT;
 }
@@ -176,25 +182,38 @@ cache_req_process(cache_request_t *req)
     if (strcasecmp(mname, "GET") != 0) {
         /* unsupported method */
     }
-    __str_append_f(&req->hdr_srv, "GET %s \n", muri);
 
-    while (data) {
-        char *fname = NULL, *fvalue = NULL;
-        data = __parse_field(data, &fname, &fvalue);
-        if (!data)
-            break;
+    struct cuckoo_hash_item *hitem = cuckoo_hash_lookup(hash, muri, strlen(muri));
+    if (hitem) {
+        /* this source already in cache; use it */
+        fprintf(stdout, "get from cache: %s\n", muri);
+        req->response = hitem->value;
+    } else {
+        /* retrieve response from server */
+        __str_append_f(&req->hdr_srv, "GET %s \r\n", muri);
+        while (data) {
+            char *fname = NULL, *fvalue = NULL;
+            data = __parse_field(data, &fname, &fvalue);
+            if (!data)
+                break;
 
-        if (strcasecmp(fname, "HOST") == 0) {
-            __str_append_f(&mhost, "%s", fvalue);
-            __str_append_f(&req->hdr_srv, "Host: %s\n", fvalue);
-        } else if (strcasecmp(fname, "Connection") == 0) {
-            __str_append_f(&req->hdr_srv, "Connection: close\n");
-        } else {
-            __str_append_f(&req->hdr_srv, "%s: %s\n", fname, fvalue);
+            if (strcasecmp(fname, "HOST") == 0) {
+                __str_append_f(&mhost, "%s", fvalue);
+                __str_append_f(&req->hdr_srv, "Host: %s\n", fvalue);
+           } else if (strcasecmp(fname, "Connection") == 0) {
+                __str_append_f(&req->hdr_srv, "Connection: close\n");
+            } else {
+                __str_append_f(&req->hdr_srv, "%s: %s\n", fname, fvalue);
+            }
         }
+        cache_str_t *response = calloc(1, sizeof(*response));
+        __get_response(mhost.data, &req->hdr_srv, response);
+
+        cuckoo_hash_insert(hash, muri, strlen(muri), response);
+
+        fprintf(stdout, "retrieved from server: %s\n", muri);
+        req->response = response;
     }
-    __get_response(mhost.data, &req->hdr_srv, &req->response);
-    //fwrite(req->response.data, req->response.len, 1, stdout);
 
     req->state = REQSTATE_FROM_MEMORY;
     req->cursor = 0;
@@ -227,12 +246,12 @@ cache_resp_read(cache_request_t *req, char *buffer, size_t size)
         req->state = REQSTATE_FINISHED;
     }
 #endif
-    if (req->cursor + size > req->response.len) {
-        size = req->response.len - req->cursor;
+    if (req->cursor + size > req->response->len) {
+        size = req->response->len - req->cursor;
     }
-    memcpy(buffer, &req->response.data[req->cursor], size);
+    memcpy(buffer, &req->response->data[req->cursor], size);
     req->cursor += size;
-    if (req->cursor == req->response.len) {
+    if (req->cursor == req->response->len) {
         req->state = REQSTATE_FINISHED;
     }
     return (int)size;
