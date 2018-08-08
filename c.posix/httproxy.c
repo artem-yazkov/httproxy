@@ -3,6 +3,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <unistd.h>
+#include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
 
@@ -20,53 +21,119 @@ typedef struct conn_info {
     int                 fd;
     socklen_t           addr_len;
     struct sockaddr_in  addr;
-
     uint64_t            client_id;
+
     struct conn_info   *next;
+    struct conn_info   *prev;
 } conn_info_t;
 
-conn_info_t conn_listen;
-conn_info_t *conn_first = &conn_listen, *conn_last = &conn_listen;
+typedef struct conn_info_list {
+    conn_info_t *first;
+    conn_info_t *last;
+    size_t       count;
+} conn_info_list_t;
+
+conn_info_list_t conn_list;
 
 conn_info_t *
-conn_info_alloc(void)
+conn_info_add(void)
 {
     static uint64_t client_id;
-
     conn_info_t *ci = calloc(1, sizeof(conn_info_t));
-    ci->client_id = ++client_id;
+    ci->client_id = client_id++;
 
-    conn_last->next = ci;
-    conn_last       = ci;
-
+    if (!conn_list.first || !conn_list.last) {
+        conn_list.first = conn_list.last = ci;
+        conn_list.count = 1;
+    } else {
+        conn_list.last->next = ci;
+        ci->prev = conn_list.last;
+        conn_list.last = ci;
+        conn_list.count++;
+    }
     return ci;
 }
 
 void
-conn_info_free(conn_info_t *conn_info)
+conn_info_del(conn_info_t *ci)
 {
+    if (ci->prev) {
+        ci->prev->next = ci->next;
+    }
+    if (ci->next) {
+        ci->next->prev = ci->prev;
+    }
+    if (ci == conn_list.first) {
+        conn_list.first = ci->next;
+    }
+    if (ci == conn_list.last) {
+        conn_list.last = ci->prev;
+    }
+    conn_list.count--;
+}
 
+void
+say_hello(conn_info_t *ci)
+{
+    char wbuf[1024];
+    ssize_t wcount = snprintf(wbuf, sizeof(wbuf) - 1,
+                              "Hello, client %lu !\n"
+                              "Welcome to HTTProxy prototype\n"
+                              "type 'quit' for close session, and something else for echo\n\n",
+                              ci->client_id);
+    if (wcount > 0) {
+        write(ci->fd, wbuf, wcount);
+    }
+}
+
+void
+say_echo(conn_info_t *ci, int *quit)
+{
+    char    rbuf[1024];
+    char    wbuf[1024 + 128];
+    ssize_t rcount, wcount;
+
+    while (1) {
+        rcount = read(ci->fd, rbuf, sizeof(rbuf) - 1);
+        if (rcount <= 0) {
+            break;
+        }
+        rbuf[rcount] = '\0';
+        for (int itrunc = 1; (rcount - itrunc >= 0) && !isprint(rbuf[rcount - itrunc]); itrunc++) {
+            rbuf[rcount - itrunc] = '\0';
+        }
+        wcount = snprintf(wbuf, sizeof(wbuf) - 1, "client %lu say: %s\n",
+                          ci->client_id, rbuf);
+        write(ci->fd, wbuf, wcount);
+
+        if (strcmp(rbuf, "quit") == 0) {
+            *quit = 1;
+            break;
+        }
+    }
 }
 
 int main(int argc, char *argv[])
 {
-    conn_listen.fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (conn_listen.fd < 0) {
+    conn_info_t *listening = conn_info_add();
+
+    listening->fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (listening->fd < 0) {
         fprintf(stderr, "Listen socket creation error: %s\n", strerror(errno));
         return -1;
     }
 
-    conn_listen.addr.sin_family = AF_INET;
-    conn_listen.addr.sin_port   = htons(LISTEN_PORT);
-    if (inet_aton(LISTEN_ADDR, &conn_listen.addr.sin_addr) == 0) {
+    listening->addr.sin_family = AF_INET;
+    listening->addr.sin_port   = htons(LISTEN_PORT);
+    if (inet_aton(LISTEN_ADDR, &listening->addr.sin_addr) == 0) {
         fprintf(stderr, "Bad listen addr: %s\n", LISTEN_ADDR);
         return -1;
     }
-    if (bind(conn_listen.fd, (struct sockaddr *)&conn_listen.addr, sizeof(conn_listen.addr)) < 0) {
+    if (bind(listening->fd, (struct sockaddr *)&listening->addr, sizeof(listening->addr)) < 0) {
         fprintf(stderr, "Listen socket binding error: %s\n", strerror(errno));
         return -1;
     }
-    if (listen(conn_listen.fd, INT32_MAX) < 0) {
+    if (listen(listening->fd, INT32_MAX) < 0) {
         fprintf(stderr, "Listen socket listen error: %s\n", strerror(errno));
         return -1;
     }
@@ -80,8 +147,8 @@ int main(int argc, char *argv[])
     }
     struct epoll_event ev_push;
     ev_push.events   = EPOLLIN;
-    ev_push.data.ptr = (void *)&conn_listen;
-    if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, conn_listen.fd, &ev_push) < 0) {
+    ev_push.data.ptr = (void *)listening;
+    if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, listening->fd, &ev_push) < 0) {
         fprintf(stderr, "Can't add listen socket to epoll: %s\n", strerror(errno));
         return -1;
     }
@@ -94,16 +161,16 @@ int main(int argc, char *argv[])
             return -1;
         }
         for (int iev = 0; iev < ev_cnt; iev++) {
-            if (ev_wait[iev].data.ptr == (void *)&conn_listen) {
-                conn_info_t *ci = conn_info_alloc();
+            if (ev_wait[iev].data.ptr == (void *)listening) {
+                conn_info_t *ci = conn_info_add();
                 if (ci == NULL) {
                     fprintf(stderr, "Can't alloc new connection info; refuse client\n");
                     continue;
                 }
-                ci->fd = accept(conn_listen.fd, (struct sockaddr *)&ci->addr, &ci->addr_len);
+                ci->fd = accept(listening->fd, (struct sockaddr *)&ci->addr, &ci->addr_len);
                 if (ci->fd < 0) {
                     fprintf(stderr, "Can't accept new client\n");
-                    conn_info_free(ci);
+                    conn_info_del(ci);
                     continue;
                 }
                 fcntl(ci->fd, F_SETFL, O_NONBLOCK);
@@ -112,24 +179,19 @@ int main(int argc, char *argv[])
                 ev_push.data.ptr = (void *)ci;
                 if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, ci->fd, &ev_push) < 0) {
                     fprintf(stderr, "Can't add client socket to epoll: %s\n", strerror(errno));
-                    conn_info_free(ci);
+                    conn_info_del(ci);
                     continue;
                 }
+                say_hello(ci);
             } else {
                 conn_info_t *ci = (conn_info_t *)ev_wait[iev].data.ptr;
-                char    rbuf[1024];
-                char    wbuf[1024 + 128];
-                ssize_t rcount, wcount;
+                int close_request = 0;
+                say_echo(ci, &close_request);
 
-                while (1) {
-                    rcount = read(ci->fd, rbuf, sizeof(rbuf) - 1);
-                    if (rcount <= 0) {
-                        break;
-                    }
-                    rbuf[rcount] = '\0';
-                    wcount = snprintf(wbuf, sizeof(wbuf) - 1, "client %lu say: %s\n",
-                                      ci->client_id, rbuf);
-                    write(ci->fd, wbuf, wcount);
+                if (close_request) {
+                    epoll_ctl(epoll_fd, EPOLL_CTL_DEL, ci->fd, NULL);
+                    close(ci->fd);
+                    conn_info_del(ci);
                 }
             }
         }
