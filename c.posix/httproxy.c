@@ -89,7 +89,7 @@ say_hello(conn_info_t *ci)
 }
 
 void
-say_echo(conn_info_t *ci, int *quit)
+say_echo(conn_info_t *ci, int *hardclose, int *softclose)
 {
     char    rbuf[1024];
     char    wbuf[1024 + 128];
@@ -97,9 +97,13 @@ say_echo(conn_info_t *ci, int *quit)
 
     while (1) {
         rcount = read(ci->fd, rbuf, sizeof(rbuf) - 1);
-        if (rcount <= 0) {
+        if (rcount == 0) {
+            *hardclose = 1;
+            break;
+        } else if (rcount < 0) {
             break;
         }
+
         rbuf[rcount] = '\0';
         for (int itrunc = 1; (rcount - itrunc >= 0) && !isprint(rbuf[rcount - itrunc]); itrunc++) {
             rbuf[rcount - itrunc] = '\0';
@@ -109,7 +113,7 @@ say_echo(conn_info_t *ci, int *quit)
         write(ci->fd, wbuf, wcount);
 
         if (strcmp(rbuf, "quit") == 0) {
-            *quit = 1;
+            *softclose = 1;
             break;
         }
     }
@@ -207,7 +211,7 @@ int main(int argc, char *argv[])
                 }
                 fcntl(ci->fd, F_SETFL, O_NONBLOCK);
 
-                ev_push.events   = EPOLLIN | EPOLLOUT | EPOLLRDHUP;
+                ev_push.events   = EPOLLIN;
                 ev_push.data.ptr = (void *)ci;
                 if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, ci->fd, &ev_push) < 0) {
                     fprintf(stderr, "Can't add client socket to epoll: %s\n", strerror(errno));
@@ -217,12 +221,10 @@ int main(int argc, char *argv[])
                 say_hello(ci);
             } else {
                 conn_info_t *ci = (conn_info_t *)ev_wait[iev].data.ptr;
-                int softclose = 0;
-                int hardclose = ev_wait[iev].events & EPOLLRDHUP;
+                int hardclose = 0, softclose = 0;
 
-                if (!hardclose && (ev_wait[iev].events & EPOLLIN)) {
-                    say_echo(ci, &softclose);
-                }
+                say_echo(ci, &hardclose, &softclose);
+
                 if (softclose || hardclose) {
                     epoll_ctl(epoll_fd, EPOLL_CTL_DEL, ci->fd, NULL);
                     close(ci->fd);
