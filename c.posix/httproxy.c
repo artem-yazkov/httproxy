@@ -2,6 +2,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <stdlib.h>
+#include <signal.h>
 #include <unistd.h>
 #include <ctype.h>
 #include <errno.h>
@@ -69,6 +70,7 @@ conn_info_del(conn_info_t *ci)
     if (ci == conn_list.last) {
         conn_list.last = ci->prev;
     }
+    free(ci);
     conn_list.count--;
 }
 
@@ -113,6 +115,13 @@ say_echo(conn_info_t *ci, int *quit)
     }
 }
 
+int  sighandler_quit_flag;
+void sighandler_quit(int signum)
+{
+    sighandler_quit_flag = 1;
+}
+
+
 int main(int argc, char *argv[])
 {
     conn_info_t *listening = conn_info_add();
@@ -122,19 +131,24 @@ int main(int argc, char *argv[])
         fprintf(stderr, "Listen socket creation error: %s\n", strerror(errno));
         return -1;
     }
+    int sockoption = 1;
+    setsockopt(listening->fd, SOL_SOCKET, SO_REUSEADDR, &sockoption, sizeof(sockoption));
 
     listening->addr.sin_family = AF_INET;
     listening->addr.sin_port   = htons(LISTEN_PORT);
     if (inet_aton(LISTEN_ADDR, &listening->addr.sin_addr) == 0) {
         fprintf(stderr, "Bad listen addr: %s\n", LISTEN_ADDR);
+        close(listening->fd);
         return -1;
     }
     if (bind(listening->fd, (struct sockaddr *)&listening->addr, sizeof(listening->addr)) < 0) {
         fprintf(stderr, "Listen socket binding error: %s\n", strerror(errno));
+        close(listening->fd);
         return -1;
     }
     if (listen(listening->fd, INT32_MAX) < 0) {
         fprintf(stderr, "Listen socket listen error: %s\n", strerror(errno));
+        close(listening->fd);
         return -1;
     }
 
@@ -143,6 +157,7 @@ int main(int argc, char *argv[])
     int epoll_fd = epoll_create1(0);
     if (epoll_fd < 0) {
         fprintf(stderr, "Epoll instance creation error: %s\n", strerror(errno));
+        close(listening->fd);
         return -1;
     }
     struct epoll_event ev_push;
@@ -150,15 +165,32 @@ int main(int argc, char *argv[])
     ev_push.data.ptr = (void *)listening;
     if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, listening->fd, &ev_push) < 0) {
         fprintf(stderr, "Can't add listen socket to epoll: %s\n", strerror(errno));
+        close(listening->fd);
+        close(epoll_fd);
         return -1;
     }
+
+    struct sigaction sigact;
+    sigact.sa_handler = sighandler_quit;
+    sigemptyset(&sigact.sa_mask);
+    sigact.sa_flags = 0;
+
+    sigaction(SIGHUP, &sigact, NULL);
+    sigaction(SIGINT, &sigact, NULL);
+    sigaction(SIGTERM, &sigact, NULL);
+
 
     struct epoll_event ev_wait[EPOLL_EVENTS];
     while (1) {
         int ev_cnt = epoll_wait(epoll_fd, ev_wait, EPOLL_EVENTS, -1);
+
+        if (sighandler_quit_flag) {
+            fprintf(stderr, "HUP|INT|TERM signal was received; exit gracefully\n");
+            break;
+        }
         if (ev_cnt < 0) {
             fprintf(stderr, "Epoll wait error: %s\n", strerror(errno));
-            return -1;
+            break;
         }
         for (int iev = 0; iev < ev_cnt; iev++) {
             if (ev_wait[iev].data.ptr == (void *)listening) {
@@ -175,7 +207,7 @@ int main(int argc, char *argv[])
                 }
                 fcntl(ci->fd, F_SETFL, O_NONBLOCK);
 
-                ev_push.events   = EPOLLIN | EPOLLOUT;
+                ev_push.events   = EPOLLIN | EPOLLOUT | EPOLLRDHUP;
                 ev_push.data.ptr = (void *)ci;
                 if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, ci->fd, &ev_push) < 0) {
                     fprintf(stderr, "Can't add client socket to epoll: %s\n", strerror(errno));
@@ -185,10 +217,13 @@ int main(int argc, char *argv[])
                 say_hello(ci);
             } else {
                 conn_info_t *ci = (conn_info_t *)ev_wait[iev].data.ptr;
-                int close_request = 0;
-                say_echo(ci, &close_request);
+                int softclose = 0;
+                int hardclose = ev_wait[iev].events & EPOLLRDHUP;
 
-                if (close_request) {
+                if (!hardclose && (ev_wait[iev].events & EPOLLIN)) {
+                    say_echo(ci, &softclose);
+                }
+                if (softclose || hardclose) {
                     epoll_ctl(epoll_fd, EPOLL_CTL_DEL, ci->fd, NULL);
                     close(ci->fd);
                     conn_info_del(ci);
@@ -196,6 +231,21 @@ int main(int argc, char *argv[])
             }
         }
     }
+
+    for (conn_info_t *ci_prev = NULL, *ci = conn_list.first; ci != NULL; ci = ci->next) {
+        if (ci_prev != NULL) {
+            epoll_ctl(epoll_fd, EPOLL_CTL_DEL, ci_prev->fd, NULL);
+            close(ci_prev->fd);
+            free(ci_prev);
+        }
+        ci_prev = ci;
+        if (ci->next == NULL) {
+            epoll_ctl(epoll_fd, EPOLL_CTL_DEL, ci->fd, NULL);
+            close(ci->fd);
+            free(ci);
+        }
+    }
+    close(epoll_fd);
 
     return 0;
 }
